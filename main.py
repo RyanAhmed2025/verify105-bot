@@ -3,6 +3,8 @@ Barasat College Helpdesk Verification Bot
 Private verification system with working hours (6 AM - 6 PM IST)
 """
 
+from flask import Flask, request
+import threading
 import asyncio
 import os
 from datetime import datetime
@@ -28,6 +30,11 @@ VERIFIED_USERS_FILE = "verified_users.txt"
 
 # Timezone for IST
 IST = pytz.timezone('Asia/Kolkata')
+
+# ============= FLASK WEB SERVER FOR WEBHOOK DEPLOYMENT ============
+app = Flask(__name__)
+application_global = None  # will hold the telegram Application instance
+
 
 # ============================================
 # Store pending verifications in private chat
@@ -404,7 +411,21 @@ async def post_init(application: Application):
     bot = await application.bot.get_me()
     BOT_USERNAME = bot.username
     print(f"Bot username: @{BOT_USERNAME}")
+    
+@app.post("/webhook")
+def webhook_handler():
+    if application_global is None:
+        return "App not ready", 503
 
+    update_data = request.get_json(force=True)
+    update = Update.de_json(update_data, application_global.bot)
+    application_global.update_queue.put_nowait(update)
+    return "OK", 200
+    
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    print(f"Flask server running on port {port}")
+    app.run(host="0.0.0.0", port=port)
 
 def main():
     """
@@ -444,7 +465,30 @@ def main():
     print("Operating hours: 6 AM to 6 PM IST")
     
     # Start the bot
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    global application_global
+    application_global = application
+
+    if os.getenv("USE_WEBHOOK", "false").lower() == "true":
+        # -------- RUNNING ON CLOUD HOST THAT REQUIRES PORT --------
+        webhook_url = os.getenv("WEBHOOK_URL")
+        if not webhook_url:
+            raise ValueError("WEBHOOK_URL not set in environment!")
+
+        print("Setting webhook to:", webhook_url + "/webhook")
+        application.bot.set_webhook(webhook_url + "/webhook")
+
+        # Start Flask in another thread
+        threading.Thread(target=run_flask).start()
+
+        print("Bot running via webhook mode.")
+        application.run_async()
+        asyncio.get_event_loop().run_forever()
+
+    else:
+        # -------- LOCAL DEVELOPMENT --------
+        print("Running bot locally using polling…")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 
 if __name__ == "__main__":
